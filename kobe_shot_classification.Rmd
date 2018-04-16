@@ -1,0 +1,337 @@
+---
+title: "Kobe Bryant Shot Classification"
+author: "Jacob Norman"
+date: "April 15, 2018"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Background
+
+Kobe Bryant is a former guard for the Los Angeles Lakers. He is a 5-time NBA champion, 18-time All-Star, 15-time member of the All-NBA team, 12-time member of the NBA All-Defensive team, and future (first-ballot) Hall of Famer. After a 20 year career, he retired in 2016, scoring 60 points in his final NBA game. He is widely considered to be one of the greatest basketball players of all time.
+
+This data used in this file is a record of various statistics and information recorded for every shot in Kobe Bryant's career, including the game date, opponent, type of shot, distance, area on the court, etc. Out of the over 30,000 shots, 5,000 of them have the "shot_made_flag", which indicates whethe rthe shot was made or missed, as N/A. This is part of a Kaggle competition where the goal was to classify whether the 5,000 shots were either a make or a miss. Ther ewas no prize involved and the competition is now closed. In other words, it was a just for fun event. You can check out the site [here](https://www.kaggle.com/c/kobe-bryant-shot-selection).
+
+Most of the submissions on Kaggle seem to work exclusively with Python for this problem. For the process of exploratory data analysis and plotting, I think R has the distinct advantage. Additionally, R is a statistical computing language, so I am going to leverage its strengths here. The benefits of Pyhton would be if I had to scrap the data from the web or if I had to clean it. In this case, I had to do neither. Pandas and SciKitLearn do not offer much statistical insights beyond the basics, so I think is the more appropriate tool to work with here. The only disadvantage would be that Python tends to be faster than R, and with 30,000 rows of data, that could be huge here.
+
+## Packages
+
+```{r load_packages}
+library(plyr)
+library(dplyr)
+library(stringr)
+library(ggplot2)
+library(reshape2)
+library(boot)
+library(caret)
+library(randomForest)
+```
+
+## Read Data
+
+Let's read in the data.
+
+```{r raw_data}
+raw <- read.csv("data/data.csv")
+str(raw)
+```
+
+As mentioned in the Kaggle competition page, this dataset suffers from data leakage. Data leakage is a phenomenon that occurs when there is unexpected information in a training data set that gives the model an unfair advantage in predicting. Basically, the predictions turn out to be "too good". Their suggestion to avoid this problem is to only train on shots prior to the ones being predicted. This seems pretty straightforward, but breaking up all the rows into various time series chunks to train on seems like it could take a while.
+
+My solution is just to remove the data that is causing the leakage. Looking at all of the fields, I believe the fields that would be causing the issue would be related to the time or date. In this case, I believe it is just "game_date" and "season". Both of these eliminate the time series nature to the data; after their removal, it just becomes a record of misses and makes and how and where they happened.
+
+Additionally, it appears as though certain columns can be deleted, such as "team_name", "team_id", and "matchup". Kobe was a career Laker, so his team and its ID is constant. And the information supplied by "matchup" is already included in "opponent". We will update the data frame to reflect this.
+
+```{r raw_data_cleaned}
+raw <- raw[,-c(3:4, 12,20:22, 23)]
+str(raw)
+```
+
+Here is the data set, only the first 5 rows are shown. Every single shot attempted by Kobe during his 20 year career is documented. It includes the type of shot, location on the court, minutes and seconds remaining, shot distance, shot area zone, team, opponent, and shot ID. 
+
+```{r}
+head(raw, 5)
+```
+
+Let's partition the data based on whether the "shot_made_flag" value is null. The kaggle dataframe is the blank data that will be tested after the models are built. The clean data frame will be further analyzed and modeled to predict on th kaggle data.
+
+```{r kaggle_partition}
+kaggle <- raw %>%
+  filter(is.na(shot_made_flag))
+
+clean <- na.omit(raw)
+
+#Let's remove the old data frame to clean up the envirnoment
+rm(raw)
+```
+
+## Exploratory Data Analysis
+
+Time for some EDA.
+
+```{r clean_structure}
+str(clean)
+```
+
+Here is the clean data frame. For now, lets keep "shot_made_flag" as an integer. This will make group by analysis and plotting easier.
+
+Let's see how accurate Kobe is based on whether the shot is a 2-pointer or a 3-pointer.
+
+```{r 2pt_vs_3pt_accuracy}
+clean %>%
+  group_by(shot_type) %>%
+  summarize(Accuracy = mean(shot_made_flag),
+            Attempted = n(),
+            Made = sum(shot_made_flag)) %>%
+  arrange(desc(Accuracy))
+```
+
+As expected, his 3-pt field goal percentage is lower. Both of his accuracy values are quite high. Let's drill down on shot type.
+
+```{r combined_shot_type_accuracy}
+clean %>%
+  group_by(combined_shot_type) %>%
+  summarize(Accuracy = mean(shot_made_flag),
+            Attempted = n(),
+            Made = sum(shot_made_flag)) %>%
+  arrange(desc(Accuracy))
+```
+
+Now this is interesting. His dunks are 92% accurate, which is no surprise really; however, his layups are only 56%. I would have expected this number to be much higher. Let's investigate his range.
+
+```{r shot_zone_range_accuracy}
+clean %>%
+  group_by(shot_zone_range) %>%
+  summarize(Accuracy = mean(shot_made_flag),
+            Attempted = n(),
+            Made = sum(shot_made_flag)) %>%
+  arrange(desc(Accuracy))
+```
+
+As expected, it appears the further Kobe is from the rim, the less accurate he is. Looks like he made only one buzzer-beater back court shot in his career.
+
+So now that we know what types of shots Kobe tends to make, let's look at position on the court. First of all, there are two sets of location variables: "loc_x" and "loc_y" as well as "lon" and "lat". Let's figure out what the difference between them is. Here is a breakdown of his shots by location on the court.
+
+```{r loc_xy_vs_lonlat}
+ggplot(clean, aes(loc_x, loc_y)) + 
+  geom_point(color = "blue", alpha = 0.05) + 
+  facet_grid(~shot_made_flag, labeller=label_both)
+
+ggplot(clean, aes(lon, lat)) + 
+  geom_point(color = "red", alpha = 0.05) + 
+  facet_grid(~shot_made_flag, labeller=label_both)
+```
+
+They are mirror images of each other. It appears "loc_x" and "loc_y" maps the basketball court to the coordinate plane while "lon" and "lat" do the same thing but with longitudes and latitudes. They give the same information, so only one set of them should be used. In this case, "loc_x" and "loc_y" are more intuitive so I will be primarily using these measures. I am going to remove "lon" and "lat" because there is no sense in having the same informaton repeated in the data frame.
+
+As a side note, I think it is crazy how amazing these graphs came out. Just because Kobe concentrates his shots around the rim and the 3-point arc, the court looks so distinguished. I really thought making a graph like this would require some serious work, but it was very easy.
+
+```{r remove_lon_lat}
+kaggle <- kaggle[,-c(3,6)]
+clean <- clean[,-c(3,6)]
+```
+
+Additionally, it appears that Kobe only makes things around or inside the arc. Hardly any of his makes are from way downtown, whereas there are a lot of misses from that distance. The cutoff seems to be where "loc_y" = 300.
+
+Let's look at a breakdown of what areas are where on the court. There are a couple different measures of area as well, such as "shot_zone_area" and "shot_zone_basic". Let's see what's different about them.
+
+```{r area_vs_basic}
+
+ggplot(clean, aes(loc_x, loc_y)) + 
+  geom_point(aes(color = shot_zone_area))
+
+ggplot(clean, aes(loc_x, loc_y)) + 
+  geom_point(aes(color = shot_zone_basic))
+```
+
+
+Unlike with position on the court, there is something different about these two variables. One seems to show the relative directional position on the court, "shot_zone_area", while the other is governed by the lines on the court, "shot_zone_basic". Ultimately, both variables are just ways of putting "loc_x" and "loc_y" into groups. Some of the information is repeated, like Backcourt, but I believe there is value in keeping both of these fields.
+
+Again, these graphs are beautiful. By combining the location with the shot zone, there is a clear picture of exactly how these two variabes relate. You get an idea of exactly what lines are where, just because Kobe has taken a lot of shots just about everywhere. This is very intuitive.
+
+```{r min_remaining_accuracy}
+clean %>%
+  group_by(minutes_remaining) %>%
+  summarize(Accuracy = mean(shot_made_flag)) %>%
+  ggplot(aes(minutes_remaining, Accuracy)) + geom_point() + geom_smooth()
+```
+
+Just looking at his accuracy by miniutes remaining, it appears to look parabolic in shape. He basically gets off to a slow start and then has a poor finish. The slow start could be attributed to the fact that he's not quite warm at the beginning of the game or possibly nerves. Towards the end of the game, it makes sense that his accuracy would be lower, due to fatigue or possibly nerves. The steep drop in accuracy in the final minute could be due to the need to take low percentage shots, such as half-court shots, heavily contested jumpers, or buzzer beaters.
+
+Does Kobe perform any better against a particular team? Let's find out.
+
+```{r opponent}
+clean %>%
+  group_by(opponent) %>%
+  summarize(Accuracy = mean(shot_made_flag)) %>%
+  ggplot(aes(x = reorder(opponent, Accuracy), Accuracy)) + 
+  geom_col() + coord_flip() + labs(x = "Opponent")
+```
+
+While Kobe's accuracy does fluctuate from team to team, it to be fairly minimal. The difference in his shot accuracy between his best and worst opponent is only 0.08 at most. In other words, it looks like "opponent" shouldn't have a big impact on the models.
+
+## Modeling
+
+Since this is a binary classification problem, multiple regression is not the tool of choice. It is very unlikely that a straight line is the best way to split up "shot_made_flag". Tools like logistic regression, simple decision trees, k-nearest neighbor (KNN), and random forest are best suited for problems like this.
+
+From the Kaggle competition site, most people seemed to use random forest or other ensemble methods for their model. Most of the Kaggle log loss scores I saw were right around 0.60. The goal is for this value to be minimized. According to a helpful [website](http://www.exegetic.biz/blog/2015/12/making-sense-logarithmic-loss/), log loss quantifies the accuracy of a classifier by penalising false classifications. Minimising the Log Loss is basically equivalent to maximising the accuracy of the classifier. The very top score is 0.56528.
+
+For this project, I am going to use logistic regression and random forest. From my previous experience in the class, I know that those two tend to perform the best on classification problems. Simple decision trees and bagging are simpler versions of random forest, so there is no point in using them. Since this is a binary classification problem, KNN is probbaly not the best option either, because it is doubtful that 2 is the optimal k. I will make numeous logistic regression and random forest models, selecting the best two for final placement on the leaderboard. My prediction right now is that logistic regression will perform the best.
+
+For this project, I will use accuracy as the error metric, but I will also pay attention to false positives and false negatives.
+
+## Data Partition
+
+Let's use the caret package to partition the clean data, 80% train and 20% test. Also, let's remove a couple variables. We don't need "shot_id" because it is just a way to identify the shots and offers no predictive value. Also, "action_type" has too many levels, so not all of them are likely to be both in test and in train; "combined_shot_type" is more general so it should not have a problem.
+
+```{r clean_partition}
+#In honor of Kobe; although I could have made it 8 as well.
+set.seed(24)
+
+index <- createDataPartition(clean$shot_made_flag,
+                                  p = 0.8, 
+                                  list = FALSE, 
+                                  times = 1)
+
+clean.train <- clean[index, 2:15] 
+clean.test <- clean[-index, 2:15] 
+```
+
+**Note:** I planned on using the caret package and k-crossfold validation for each of my models. I wanted to follow a similar workflow for each one. It turned out that running the models through caret took way too long, and in some cases seemed like it would run indefinitely. This is due to the slower nature of R, the large amount of data to be processed, and the lack of computing power on my home machine. I am disappointed I could not use this method, but I understand the process behind it and feel I could repicate it if given the opportunity.
+
+## Null Model
+
+The null model for this competition will be the sample submission Kaggle provides. The formula of the model is: 
+$$shotmadeflag = 0.5$$
+After submitting the sample file to Kaggle, the base log loss score is 0.69314.
+
+## Logistic Regression
+
+For now, let's use all of the variables.
+
+```{r log_full_model}
+log_full <- glm(shot_made_flag ~ .,
+            data = clean.train,
+            family = binomial(link="logit"))
+summary(log_full)
+```
+
+It looks like there is a couple of N/A values in the model parameters, for "shot_zone_range24+ ft." and "shot_zone_rangeBack Court Shot". This is intuitive because I discussed early how there might be some overlap in some of the location variables, but ultimately they were different enought to all remain in the data.
+
+```{r log_full_fit_cm}
+log_full_fit <- (log_full$fit > 0.5) * 1
+caret::confusionMatrix(log_full$y, log_full_fit, positive="1")
+```
+
+The accuracy of the fit of the model to the training is 0.6161. This is right about where I would have expected.
+
+```{r log_full_predict_cm}
+predict_log_full <- predict(log_full, clean.test, type="response")
+log_full_predict <- (predict_log_full > 0.5) * 1
+
+caret::confusionMatrix(clean.test$shot_made_flag, log_full_predict, positive ="1")
+```
+
+So the accuracy of the model on the homemade test data is 0.6093; however, there are a lot of false positives. Let's write out the submission file on the kaggle test data and see how I did.
+
+```{r log_full_write_kaggle}
+kaggle_log_full <- predict(log_full, kaggle, type = "response")
+submit_log_full <- data.frame(shot_id = kaggle$shot_id, 
+                           shot_made_flag = kaggle_log_full)
+
+write.csv(submit_log_full, file = "submissions/log_full.csv", row.names = FALSE)
+```
+
+Log loss does not require the output to be in binary form; they can be expressed as probablities, so there is no need to convert them to binary form.
+
+The model log1 got a Kaggle score of 0.65029. I did better than the sample file, but not by much.
+
+## Random Forest
+
+Random forest works better if the variables that should be factors are classified as factors, so let's update the data frames to reflect that. In this case, it would just be "shot_made_flag" and "playoffs"
+
+```{r rf_factors}
+clean.train$shot_made_flag <- factor(clean.train$shot_made_flag)
+clean.test$shot_made_flag <- factor(clean.test$shot_made_flag)
+kaggle$shot_made_flag <- factor(kaggle$shot_made_flag)
+
+clean.train$playoffs <- factor(clean.train$playoffs)
+clean.test$playoffs <- factor(clean.test$playoffs)
+kaggle$playoffs <- factor(kaggle$playoffs)
+
+clean.train$period <- factor(clean.train$period)
+clean.test$period <- factor(clean.test$period)
+kaggle$period <- factor(kaggle$period)
+
+#Fixes Random forest error where the levels in the Kaggle data are different than in the training data
+levels(kaggle$combined_shot_type) <- levels(clean.train$combined_shot_type)
+levels(kaggle$period) <- levels(clean.train$period)
+levels(kaggle$playoffs) <- levels(clean.train$playoffs)
+levels(kaggle$shot_made_flag) <- levels(clean.train$shot_made_flag)
+levels(kaggle$shot_type) <- levels(clean.train$shot_type)
+levels(kaggle$shot_zone_area) <- levels(clean.train$shot_zone_area)
+levels(kaggle$shot_zone_basic) <- levels(clean.train$shot_zone_basic)
+levels(kaggle$shot_zone_range) <- levels(clean.train$shot_zone_range)
+levels(kaggle$opponent) <- levels(clean.train$opponent)
+```
+
+For now, let's just keep all of the variables in the model.
+
+```{r rf_full_model}
+set.seed(24)
+rf_full <- randomForest(shot_made_flag ~ .,
+                    data = clean.train,
+                    mtry=3,
+                    importance=TRUE, 
+                    na.omit = TRUE)
+rf_full
+```
+
+```{r rf_full_fit_accuracy}
+sprintf("Fit accuracy = %.4f" , (11206 + 925) / 20558)
+```
+
+Again, the fit accuracy of the full model is right about where I would expect it to be.
+
+Let's see which variables random forest thought were most important.
+
+```{r rf_full_importance}
+# Create dataframe based on importance and order by MeanDecreaseGini
+df_imp <- arrange(as.data.frame(rf_full$importance),
+                  MeanDecreaseGini)
+# Add variable column
+df_imp$variable <- as.factor(names(rf_full$importance[,1]))
+
+# Reorder the levels of the variable factor by MeanDecreaseGini
+df_imp <- within(df_imp, variable <- reorder(variable, MeanDecreaseGini))
+
+#Plot it
+ggplot(df_imp) + geom_bar(aes(x=variable, y=MeanDecreaseGini), 
+                               stat = "identity") + coord_flip()
+```
+
+Interesting. The most important variable that it split on was "opponent". With 31 other teams and a changing roster every season, this seems like a dumb variable to split on.Plus, I already determined earlier that has shot accuarcy against each team was relatively constant. In future models, I will not use this variable. 
+
+Additionally, it seems to split quite a lot on the "shot_zone" variables. Perhaps using only one of these would generalize to better results.
+
+```{r rf_full_predict_cm}
+predict_rf_full <- predict(rf_full, clean.test, type="class")
+caret::confusionMatrix(predict_rf_full, clean.test$shot_made_flag, positive = "1")
+```
+
+The accuracy on predicted data is 0.5898. This is slightly less than the fit accuracy. The sensitivity is only 0.0928, this is so much lower than you would want to see. It is the fraction of actual positives predicted as positive. This means I only got about 10% of the actual positive values right. I do not like this result.
+
+```{r rf_full_write_kaggle}
+kaggle_rf_full <- predict(rf_full, newdata = kaggle, type = "prob")
+submit_rf_full <- data.frame(shot_id = kaggle$shot_id, 
+                           shot_made_flag = kaggle_rf_full)
+submit_rf_full <- data.frame(shot_id = kaggle$shot_id,
+          shot_made_flag = submit_rf_full$shot_made_flag.1)
+
+write.csv(submit_rf_full, file = "submissions/rf_full.csv", row.names = FALSE)
+```
+
+The log loss score for the Kaggle data is 0.77430. This is higher than what I got for logistic regression. In fact, this is even higher than the null model. Honestly, this is no surprise beacuse the sensitivity is so awful. This is the classic case of overfitting. I have a hunch if I remove some variables, like "opponent", the log loss score will decrease.
