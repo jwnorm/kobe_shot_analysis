@@ -1,10 +1,10 @@
 final_project folder:
 ---------------------
--data contains one file, the master data from Kaggle
--proposal contains hmtl and md versions of the project proposal
--submissions is a collection of clearly labeled Kaggle submission files
--.gitignore, .Rhistory, and final_project.Rproj can all be ignored
--kobe_shot_classification is the actual project and has both Rmd and 
+- data contains one file, the master data from Kaggle
+- proposal contains hmtl and md versions of the project proposal
+- submissions is a collection of clearly labeled Kaggle submission files
+- .gitignore, .Rhistory, and final_project.Rproj can all be ignored
+- kobe_shot_classification is the actual project and has both Rmd and 
 html versions
 
 How to view project:
